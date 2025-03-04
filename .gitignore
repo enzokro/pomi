@@ -3,3 +3,7 @@ build/
 common/
 .env
 .elf
+
+.gba
+.elf
+.sav

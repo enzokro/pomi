@@ -1,13 +1,13 @@
 /*
- * GBA Pomodoro Timer
+ * Pomi - A GBA Pomodoro Timer
  * A productivity timer for Game Boy Advance
  * Implemented using Butano engine
  */
-
 #include "bn_core.h"
 #include "bn_timer.h"
 #include "bn_keypad.h"
 #include "bn_string.h"
+#include "bn_string_view.h"
 #include "bn_timers.h"
 #include "bn_bg_palettes.h"
 #include "bn_sprite_text_generator.h"
@@ -45,7 +45,7 @@ struct PomodoroContext {
     bool timerActive = false;
     int configSelection = 0;
     bn::timer timer;
-    uint64_t lastTicks = 0;
+    long long lastTicks = 0;  // Use long long instead of uint64_t
 };
 
 // Screen dimensions
@@ -56,32 +56,44 @@ constexpr int SCREEN_CENTER_Y = SCREEN_HEIGHT / 2;
 
 // Function declarations
 void changeState(PomodoroContext& ctx, PomodoroState newState);
-void drawProgressBar(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 64>& sprites, 
-                    int elapsed, int total, bn::color color);
+void drawProgressBar(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites, 
+                   int current, int total, bn::color color);
 void handleInput(PomodoroContext& ctx);
 void updateTimer(PomodoroContext& ctx);
 void renderPomodoro(PomodoroContext& ctx, bn::sprite_text_generator& text_generator, 
-                   bn::vector<bn::sprite_ptr, 64>& sprites);
+                  bn::vector<bn::sprite_ptr, 128>& sprites);
+void renderTimer(PomodoroContext& ctx, bn::sprite_text_generator& text_generator, 
+                bn::vector<bn::sprite_ptr, 128>& sprites);
 void renderConfig(PomodoroContext& ctx, bn::sprite_text_generator& text_generator, 
-                 bn::vector<bn::sprite_ptr, 64>& sprites);
+                bn::vector<bn::sprite_ptr, 128>& sprites);
 void playSound(int frequency, int duration);
+void renderTimerText(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites, long long seconds);
+void drawHorizontalLine(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites,
+                      int y, int width, bn::color color);
+void drawVerticalLine(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites,
+                     int x, int y1, int y2, bn::color color);
+void drawPanel(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites,
+              int x, int y, int width, int height, bn::color color, const bn::string_view& title);
 
 int main()
 {
+    // Initialize the Butano engine
     bn::core::init();
     
-    // Initialize text generator
+    // Game setup
     bn::sprite_text_generator text_generator(common::variable_8x16_sprite_font);
-    bn::vector<bn::sprite_ptr, 64> text_sprites;
+    bn::vector<bn::sprite_ptr, 128> text_sprites;
     text_generator.set_center_alignment();
     
-    // Set background color
-    bn::bg_palettes::set_transparent_color(bn::color(0, 0, 0));
+    // Set background color to dark blue for space-like feel
+    bn::bg_palettes::set_transparent_color(bn::color(0, 0, 8)); // Very dark blue
     
     // Initialize Pomodoro context
     PomodoroContext ctx;
     ctx.secondsRemaining = ctx.config.workTime;
+    ctx.state = PomodoroState::WORK;  // Set initial state to WORK instead of default IDLE
     
+    // Main game loop
     while(true)
     {
         // Handle user input
@@ -90,69 +102,68 @@ int main()
         // Update timer
         updateTimer(ctx);
         
-        // Clear previous text sprites
-        text_sprites.clear();
+        // Clear previous text sprites and create new empty vector for this frame
+        text_sprites = bn::vector<bn::sprite_ptr, 128>();
         
-        // Render appropriate screen
+        // Render appropriate screen based on current state
         if(ctx.state == PomodoroState::CONFIG) {
             renderConfig(ctx, text_generator, text_sprites);
         } else {
             renderPomodoro(ctx, text_generator, text_sprites);
         }
         
+        // Process frame and wait for next
         bn::core::update();
     }
 }
 
 // Update the timer state
 void updateTimer(PomodoroContext& ctx) {
-    if (ctx.state == PomodoroState::CONFIG || !ctx.timerActive) {
-        // Reset timer when not active
-        ctx.lastTicks = ctx.timer.elapsed_ticks();
+    // Only update if timer is active
+    if (!ctx.timerActive) {
         return;
     }
     
     // Get elapsed time
-    uint64_t currentTicks = ctx.timer.elapsed_ticks();
-    uint64_t elapsedTicks = currentTicks - ctx.lastTicks;
+    long long currentTicks = ctx.timer.elapsed_ticks();
+    long long elapsedTicks = currentTicks - ctx.lastTicks;
     
     // Convert to seconds using Butano's utility
     if (elapsedTicks >= bn::timers::ticks_per_second()) {
-        // Restart the timer accounting for any remainder
+        // Calculate how many seconds have elapsed
+        int elapsedSeconds = elapsedTicks / bn::timers::ticks_per_second();
+        
+        // Decrease the remaining time
+        ctx.secondsRemaining -= elapsedSeconds;
+        
+        // Update the last tick count
         ctx.lastTicks = currentTicks;
         
-        // Decrement the timer
-        if (ctx.secondsRemaining > 0) {
-            ctx.secondsRemaining--;
+        // Check if timer has ended
+        if (ctx.secondsRemaining <= 0) {
+            // Timer finished
+            ctx.timerActive = false;
+            ctx.secondsRemaining = 0;
             
-            // Play a tick sound at each minute
-            if (ctx.secondsRemaining % 60 == 0) {
-                playSound(1000, 5);
-            }
-        } else {
-            // Timer completed, handle state transition
-            playSound(2000, 30);
+            // Play sound to alert user
+            playSound(440, 30); // A4 note
             
-            switch (ctx.state) {
-                case PomodoroState::WORK:
-                    ctx.completedSessions++;
-                    
-                    // Every N sessions, take a long break
-                    if (ctx.completedSessions % ctx.config.sessionsPerSet == 0) {
-                        ctx.completedSets++;
-                        changeState(ctx, PomodoroState::LONG_BREAK);
-                    } else {
-                        changeState(ctx, PomodoroState::SHORT_BREAK);
-                    }
-                    break;
-                    
-                case PomodoroState::SHORT_BREAK:
-                case PomodoroState::LONG_BREAK:
-                    changeState(ctx, PomodoroState::WORK);
-                    break;
-                    
-                default:
-                    break;
+            // Switch to next state
+            // If we're in a work session, track completion
+            if (ctx.state == PomodoroState::WORK) {
+                ctx.completedSessions++;
+                
+                // Check if we've completed a full set
+                if (ctx.completedSessions % ctx.config.sessionsPerSet == 0) {
+                    ctx.completedSets++;
+                    changeState(ctx, PomodoroState::LONG_BREAK);
+                } else {
+                    changeState(ctx, PomodoroState::SHORT_BREAK);
+                }
+            } else if (ctx.state == PomodoroState::SHORT_BREAK || 
+                     ctx.state == PomodoroState::LONG_BREAK) {
+                // After a break, go back to work
+                changeState(ctx, PomodoroState::WORK);
             }
         }
     }
@@ -161,283 +172,265 @@ void updateTimer(PomodoroContext& ctx) {
 // Handle user input
 void handleInput(PomodoroContext& ctx) {
     if (ctx.state == PomodoroState::CONFIG) {
-        // Config mode input handling
+        // Configuration mode input handling
+        
+        // Navigate configuration options
         if (bn::keypad::up_pressed()) {
-            ctx.configSelection = (ctx.configSelection + 6) % 7;
-        } else if (bn::keypad::down_pressed()) {
-            ctx.configSelection = (ctx.configSelection + 1) % 7;
+            if (ctx.configSelection > 0) {
+                ctx.configSelection--;
+            } else {
+                ctx.configSelection = 3; // Wrap to last option (we now have only 4 options)
+            }
         }
         
-        if (bn::keypad::left_pressed() || bn::keypad::right_pressed()) {
-            int change = bn::keypad::left_pressed() ? -1 : 1;
-            
+        if (bn::keypad::down_pressed()) {
+            if (ctx.configSelection < 3) { // Now only 4 options (0-3)
+                ctx.configSelection++;
+            } else {
+                ctx.configSelection = 0; // Wrap to first option
+            }
+        }
+        
+        // Adjust values
+        int change = 0;
+        if (bn::keypad::left_pressed()) {
+            change = -1;
+        }
+        if (bn::keypad::right_pressed()) {
+            change = 1;
+        }
+        
+        if (change != 0) {
+            // Apply change to the selected config item
             switch (ctx.configSelection) {
                 case 0: // Work time
-                    ctx.config.workTime = bn::max(1, ctx.config.workTime + change * 60); 
+                    ctx.config.workTime += change * 60;
+                    if (ctx.config.workTime < 60) {
+                        ctx.config.workTime = 60;  // Minimum 1 minute
+                    }
                     break;
                 case 1: // Short break
-                    ctx.config.shortBreakTime = bn::max(1, ctx.config.shortBreakTime + change * 60);
+                    ctx.config.shortBreakTime += change * 60;
+                    if (ctx.config.shortBreakTime < 60) {
+                        ctx.config.shortBreakTime = 60;  // Minimum 1 minute
+                    }
                     break;
                 case 2: // Long break
-                    ctx.config.longBreakTime = bn::max(1, ctx.config.longBreakTime + change * 60);
+                    ctx.config.longBreakTime += change * 60;
+                    if (ctx.config.longBreakTime < 60) {
+                        ctx.config.longBreakTime = 60;  // Minimum 1 minute
+                    }
                     break;
                 case 3: // Sessions per set
-                    ctx.config.sessionsPerSet = bn::max(1, ctx.config.sessionsPerSet + change);
-                    break;
-                case 4: // Work color
-                    // Cycle through predefined colors - simplified for example
-                    if (change > 0) {
-                        if (ctx.config.workColor == bn::color(31, 0, 0)) ctx.config.workColor = bn::color(0, 31, 0);
-                        else if (ctx.config.workColor == bn::color(0, 31, 0)) ctx.config.workColor = bn::color(0, 0, 31);
-                        else ctx.config.workColor = bn::color(31, 0, 0);
-                    } else {
-                        if (ctx.config.workColor == bn::color(0, 0, 31)) ctx.config.workColor = bn::color(0, 31, 0);
-                        else if (ctx.config.workColor == bn::color(0, 31, 0)) ctx.config.workColor = bn::color(31, 0, 0);
-                        else ctx.config.workColor = bn::color(0, 0, 31);
+                    ctx.config.sessionsPerSet += change;
+                    if (ctx.config.sessionsPerSet < 1) {
+                        ctx.config.sessionsPerSet = 1;  // Minimum 1 session
                     }
-                    break;
-                case 5: // Short break color
-                    if (change > 0) {
-                        if (ctx.config.shortColor == bn::color(31, 0, 0)) ctx.config.shortColor = bn::color(0, 31, 0);
-                        else if (ctx.config.shortColor == bn::color(0, 31, 0)) ctx.config.shortColor = bn::color(0, 0, 31);
-                        else ctx.config.shortColor = bn::color(31, 0, 0);
-                    } else {
-                        if (ctx.config.shortColor == bn::color(0, 0, 31)) ctx.config.shortColor = bn::color(0, 31, 0);
-                        else if (ctx.config.shortColor == bn::color(0, 31, 0)) ctx.config.shortColor = bn::color(31, 0, 0);
-                        else ctx.config.shortColor = bn::color(0, 0, 31);
-                    }
-                    break;
-                case 6: // Long break color
-                    if (change > 0) {
-                        if (ctx.config.longColor == bn::color(31, 0, 0)) ctx.config.longColor = bn::color(0, 31, 0);
-                        else if (ctx.config.longColor == bn::color(0, 31, 0)) ctx.config.longColor = bn::color(0, 0, 31);
-                        else ctx.config.longColor = bn::color(31, 0, 0);
-                    } else {
-                        if (ctx.config.longColor == bn::color(0, 0, 31)) ctx.config.longColor = bn::color(0, 31, 0);
-                        else if (ctx.config.longColor == bn::color(0, 31, 0)) ctx.config.longColor = bn::color(31, 0, 0);
-                        else ctx.config.longColor = bn::color(0, 0, 31);
-                    }
-                    break;
-                default:
                     break;
             }
         }
         
-        // Exit config
+        // Exit config mode
         if (bn::keypad::b_pressed() || bn::keypad::select_pressed()) {
-            ctx.state = PomodoroState::IDLE;
-            ctx.secondsRemaining = ctx.config.workTime;
+            changeState(ctx, PomodoroState::IDLE);
         }
     } else {
-        // Normal mode input handling
+        // Normal operation mode input handling
+        
+        // Toggle timer
         if (bn::keypad::a_pressed()) {
-            // Toggle timer
             ctx.timerActive = !ctx.timerActive;
             
-            // If just started and in IDLE state, change to WORK
-            if (ctx.timerActive && ctx.state == PomodoroState::IDLE) {
-                changeState(ctx, PomodoroState::WORK);
+            // If starting timer, reset tick counter
+            if (ctx.timerActive) {
+                ctx.lastTicks = ctx.timer.elapsed_ticks();
             }
         }
         
+        // Reset timer
         if (bn::keypad::b_pressed()) {
-            // Reset timer
             ctx.timerActive = false;
-            ctx.state = PomodoroState::IDLE;
-            ctx.secondsRemaining = ctx.config.workTime;
-            ctx.completedSessions = 0;
-            ctx.completedSets = 0;
+            // Reset the tick counter
+            ctx.lastTicks = ctx.timer.elapsed_ticks();
+            
+            // Reset to appropriate duration based on current state
+            if (ctx.state == PomodoroState::WORK) {
+                ctx.secondsRemaining = ctx.config.workTime;
+            } else if (ctx.state == PomodoroState::SHORT_BREAK) {
+                ctx.secondsRemaining = ctx.config.shortBreakTime;
+            } else if (ctx.state == PomodoroState::LONG_BREAK) {
+                ctx.secondsRemaining = ctx.config.longBreakTime;
+            } else {
+                ctx.secondsRemaining = ctx.config.workTime;
+            }
         }
         
-        if (bn::keypad::start_pressed()) {
-            // Skip to next state
-            ctx.secondsRemaining = 0;
-            updateTimer(ctx);
-        }
-        
+        // Enter config mode
         if (bn::keypad::select_pressed()) {
-            // Enter config mode
             ctx.timerActive = false;
-            ctx.state = PomodoroState::CONFIG;
+            changeState(ctx, PomodoroState::CONFIG);
         }
     }
 }
 
 // Render the Pomodoro timer screen
 void renderPomodoro(PomodoroContext& ctx, bn::sprite_text_generator& text_generator,
-                  bn::vector<bn::sprite_ptr, 64>& sprites) {
+                  bn::vector<bn::sprite_ptr, 128>& sprites) {
     bn::color stateColor;
+    bn::string_view stateText;
     
-    // Choose color based on state
+    // Determine state color and text based on current state and timer activity
     if (ctx.state == PomodoroState::WORK) {
         stateColor = ctx.config.workColor;
+        stateText = ctx.timerActive ? "WORK" : "WORK - PAUSED";
     } else if (ctx.state == PomodoroState::SHORT_BREAK) {
         stateColor = ctx.config.shortColor;
+        stateText = ctx.timerActive ? "SHORT REST" : "SHORT REST - PAUSED";
     } else if (ctx.state == PomodoroState::LONG_BREAK) {
         stateColor = ctx.config.longColor;
+        stateText = ctx.timerActive ? "LONG REST" : "LONG REST - PAUSED";
     } else {
-        stateColor = bn::color(31, 31, 31); // White
+        stateColor = bn::color(31, 31, 31);
+        stateText = "STANDBY";
     }
+    
+    // Set center alignment for all text
+    text_generator.set_center_alignment();
     
     // Draw title
-    text_generator.generate(0, -60, "POMODORO TIMER", sprites);
+    text_generator.generate(0, -70, "POMI", sprites);
     
-    // Draw state
-    bn::string<32> stateText;
-    if (ctx.state == PomodoroState::IDLE) {
-        stateText = "READY";
-    } else if (ctx.state == PomodoroState::WORK) {
-        stateText = "WORK";
-    } else if (ctx.state == PomodoroState::SHORT_BREAK) {
-        stateText = "SHORT BREAK";
-    } else if (ctx.state == PomodoroState::LONG_BREAK) {
-        stateText = "LONG BREAK";
-    }
+    // Draw state panel with minimal decorations
+    drawPanel(text_generator, sprites, 0, -20, 160, 50, stateColor, "STATUS");
+    
+    // Draw current state
     text_generator.generate(0, -40, stateText, sprites);
     
-    // Draw timer
-    int minutes = ctx.secondsRemaining / 60;
-    int seconds = ctx.secondsRemaining % 60;
+    // Render timer display (centered on screen)
+    renderTimerText(text_generator, sprites, ctx.secondsRemaining);
     
-    // Format minutes and seconds as strings
-    bn::string<32> timerText;
-    if (minutes < 10) {
-        timerText += "0";
-    }
-    timerText += bn::to_string<8>(minutes);
-    timerText += ":";
-    if (seconds < 10) {
-        timerText += "0";
-    }
-    timerText += bn::to_string<8>(seconds);
+    // Draw stats with balanced spacing
+    text_generator.generate(-5, 20, "CYCLES:", sprites);
     
-    text_generator.generate(0, -20, timerText, sprites);
+    // Display session counter
+    bn::string<8> sessionText = bn::to_string<4>(ctx.completedSessions);
+    text_generator.generate(25, 20, sessionText, sprites);
     
-    // Draw progress bar
-    int totalTime;
-    if (ctx.state == PomodoroState::WORK) {
-        totalTime = ctx.config.workTime;
-    } else if (ctx.state == PomodoroState::SHORT_BREAK) {
-        totalTime = ctx.config.shortBreakTime;
-    } else if (ctx.state == PomodoroState::LONG_BREAK) {
-        totalTime = ctx.config.longBreakTime;
+    // Draw controls panel
+    drawPanel(text_generator, sprites, 0, 80, 160, 30, bn::color(0, 31, 31), "COMMANDS");
+    
+    // Create dynamic command text based on timer state
+    bn::string<64> commandText;
+    if (ctx.timerActive) {
+        commandText = "Pause:A Reset:B Config:SELECT";
     } else {
-        totalTime = ctx.config.workTime;
+        commandText = "Start:A Reset:B Config:SELECT";
     }
     
-    drawProgressBar(text_generator, sprites, totalTime - ctx.secondsRemaining, totalTime, stateColor);
-    
-    // Draw session info
-    bn::string<32> sessionText = "Sessions: ";
-    sessionText += bn::to_string<8>(ctx.completedSessions % ctx.config.sessionsPerSet);
-    sessionText += "/";
-    sessionText += bn::to_string<8>(ctx.config.sessionsPerSet);
-    sessionText += " Sets: ";
-    sessionText += bn::to_string<8>(ctx.completedSets);
-    
-    text_generator.generate(0, 20, sessionText, sprites);
-    
-    // Draw controls
-    text_generator.generate(0, 50, "A: START/PAUSE  B: RESET", sprites);
-    text_generator.generate(0, 65, "SELECT: SETTINGS  START: SKIP", sprites);
+    // Show controls with proper spacing
+    text_generator.generate(0, 70, commandText, sprites);
 }
 
 // Render the configuration menu
 void renderConfig(PomodoroContext& ctx, bn::sprite_text_generator& text_generator,
-                bn::vector<bn::sprite_ptr, 64>& sprites) {
-    // Draw title
-    text_generator.generate(0, -70, "SETTINGS", sprites);
+                bn::vector<bn::sprite_ptr, 128>& sprites) {
+    // Create new empty vector to replace the current one
+    sprites = bn::vector<bn::sprite_ptr, 128>();
     
-    // Define items with their values
-    struct ConfigItem {
-        bn::string<32> text;
-        bool selected;
+    // Ensure center alignment
+    text_generator.set_center_alignment();
+    
+    // Draw title
+    text_generator.generate(0, -70, "CONFIG", sprites);
+    
+    // Draw simplified config panel
+    drawPanel(text_generator, sprites, 0, 0, 160, 100, bn::color(0, 31, 31), "PARAMS");
+    
+    // Define simplified config items
+    const char* item_labels[] = {
+        "WORK:", "S.REST:", "L.REST:", "SET SIZE:"
     };
     
-    ConfigItem items[7];
-    
-    // Work time
-    items[0].text = "WORK TIME: ";
-    items[0].text += bn::to_string<8>(ctx.config.workTime / 60);
-    items[0].text += "m";
-    items[0].selected = (ctx.configSelection == 0);
-    
-    // Short break
-    items[1].text = "SHORT BREAK: ";
-    items[1].text += bn::to_string<8>(ctx.config.shortBreakTime / 60);
-    items[1].text += "m";
-    items[1].selected = (ctx.configSelection == 1);
-    
-    // Long break
-    items[2].text = "LONG BREAK: ";
-    items[2].text += bn::to_string<8>(ctx.config.longBreakTime / 60);
-    items[2].text += "m";
-    items[2].selected = (ctx.configSelection == 2);
-    
-    // Sessions per set
-    items[3].text = "SESSIONS PER SET: ";
-    items[3].text += bn::to_string<8>(ctx.config.sessionsPerSet);
-    items[3].selected = (ctx.configSelection == 3);
-    
-    // Colors
-    items[4].text = "WORK COLOR";
-    items[4].selected = (ctx.configSelection == 4);
-    
-    items[5].text = "SHORT BREAK COLOR";
-    items[5].selected = (ctx.configSelection == 5);
-    
-    items[6].text = "LONG BREAK COLOR";
-    items[6].selected = (ctx.configSelection == 6);
-    
-    // Draw menu items
-    for (int i = 0; i < 7; ++i) {
-        bn::color itemColor = items[i].selected ? bn::color(0, 31, 31) : bn::color(31, 31, 31);
-        text_generator.generate(0, -50 + i * 15, items[i].text, sprites);
+    // Display only 4 key config items
+    for (int i = 0; i < 4; ++i) {
+        bn::string<24> itemText = item_labels[i];
         
-        // Draw color boxes for color settings
-        if (i == 4) {
-            // Draw colored rectangle for work color
-            text_generator.generate(70, -50 + i * 15, "[    ]", sprites);
-        } else if (i == 5) {
-            // Draw colored rectangle for short break color
-            text_generator.generate(70, -50 + i * 15, "[    ]", sprites);
-        } else if (i == 6) {
-            // Draw colored rectangle for long break color
-            text_generator.generate(70, -50 + i * 15, "[    ]", sprites);
+        // Show selection indicator
+        if (ctx.configSelection == i) {
+            text_generator.generate(-75, -40 + i * 20, ">", sprites);
         }
+        
+        // Add value for each item
+        switch (i) {
+            case 0: // Work time
+                itemText.append(bn::to_string<4>(ctx.config.workTime / 60));
+                itemText.append("m");
+                break;
+            case 1: // Short break
+                itemText.append(bn::to_string<4>(ctx.config.shortBreakTime / 60));
+                itemText.append("m");
+                break;
+            case 2: // Long break
+                itemText.append(bn::to_string<4>(ctx.config.longBreakTime / 60));
+                itemText.append("m");
+                break;
+            case 3: // Sessions per set
+                itemText.append(bn::to_string<4>(ctx.config.sessionsPerSet));
+                break;
+        }
+        
+        // Display the item
+        text_generator.generate(0, -40 + i * 20, itemText, sprites);
     }
     
-    // Draw controls guide
-    text_generator.generate(0, 60, "UP/DOWN: NAVIGATE", sprites);
-    text_generator.generate(0, 75, "LEFT/RIGHT: CHANGE VALUE", sprites);
-    text_generator.generate(0, 90, "SELECT/B: EXIT SETTINGS", sprites);
+    // Draw controls at bottom
+    text_generator.generate(0, 60, "NAVIGATE:\x18\x19 ADJUST:\x1A\x1B EXIT:B", sprites);
 }
 
 // Draw a progress bar
-void drawProgressBar(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 64>& sprites,
-                   int elapsed, int total, bn::color color) {
+void drawProgressBar(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites,
+                   int current, int total, bn::color color) {
     // Calculate progress (0-100%)
-    int progress = (elapsed * 100) / total;
+    int progress = total > 0 ? (current * 100) / total : 0;
     
-    // Draw the progress bar as a series of characters
-    bn::string<32> barText;
-    barText.append("[");
+    // Create a string_view for the blocks we'll use
+    bn::string_view full_block = "■";
+    bn::string_view empty_block = "□";
+    
+    // Draw the progress bar as a series of characters - use a larger buffer
+    bn::string<128> barText = "[";
+    
+    // Use different characters for a more futuristic look
     for (int i = 0; i < 20; ++i) {
         if (i * 5 < progress) {
-            barText.append("=");
+            barText.append(full_block);
         } else {
-            barText.append(" ");
+            barText.append(empty_block);
         }
     }
     barText.append("]");
     
     // Draw the bar
-    text_generator.generate(0, 0, barText, sprites);
+    text_generator.generate(0, 15, barText, sprites);
+    
+    // Draw percentage
+    bn::string<16> percentText = bn::to_string<8>(progress);
+    percentText.append("%");
+    text_generator.generate(0, 30, percentText, sprites);
 }
 
 // Change the timer state
 void changeState(PomodoroContext& ctx, PomodoroState newState) {
+    // Store previous state for transition effects
+    PomodoroState oldState = ctx.state;
+    
+    // Update state
     ctx.state = newState;
+    
+    // Reset timer activity when changing states
+    if (oldState != newState && newState != PomodoroState::CONFIG) {
+        ctx.timerActive = false;
+    }
     
     // Set the new timer based on the state
     switch (newState) {
@@ -455,6 +448,18 @@ void changeState(PomodoroContext& ctx, PomodoroState newState) {
             ctx.secondsRemaining = ctx.config.workTime;
             break;
     }
+    
+    // Play transition sound
+    if (oldState != newState) {
+        // Different sounds for different transitions
+        if (newState == PomodoroState::WORK) {
+            playSound(1500, 20);
+        } else if (newState == PomodoroState::SHORT_BREAK || newState == PomodoroState::LONG_BREAK) {
+            playSound(800, 20);
+        } else if (newState == PomodoroState::IDLE) {
+            playSound(500, 10);
+        }
+    }
 }
 
 // Play a sound effect
@@ -463,4 +468,144 @@ void playSound(int frequency, int duration) {
     // In a real implementation, this would use Butano's audio features
     (void)frequency;
     (void)duration;
+}
+
+// Draw a horizontal line
+void drawHorizontalLine(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites,
+                      int y, int width, bn::color color) {
+    int halfWidth = width / 2;
+    
+    // Create string for horizontal line
+    bn::string<128> line;
+    
+    // Fill with horizontal line characters - make sure we don't overflow
+    int maxChars = halfWidth > 126 ? 126 : halfWidth; // Leave room for null terminator
+    for (int i = 0; i < maxChars; ++i) {
+        line += "-";
+    }
+    
+    // Center alignment for line
+    text_generator.set_center_alignment();
+    text_generator.generate(0, y, line, sprites);
+    text_generator.set_left_alignment();
+}
+
+// Draw a vertical line (simplified)
+void drawVerticalLine(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites,
+                     int x, int y1, int y2, bn::color color) {
+    // Draw vertical line by stacking characters
+    for (int y = y1; y <= y2; y += 8) {
+        text_generator.generate(x, y, "|", sprites);
+    }
+}
+
+// Draw a simplified panel with title
+void drawPanel(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites,
+              int x, int y, int width, int height, bn::color color, const bn::string_view& title) {
+    // Just draw the title at the top of where the panel would be
+    if (!title.empty()) {
+        // Calculate the top border position
+        int topBorderY = y - height/2;
+        
+        // Draw a simple header
+        bn::string<32> header = "[ ";
+        header.append(title);
+        header.append(" ]");
+        
+        // Generate title at the top center of the panel using the provided x coordinate
+        text_generator.generate(x, topBorderY - 8, header, sprites);
+    }
+}
+
+// Render timer text as MM:SS
+void renderTimerText(bn::sprite_text_generator& text_generator, bn::vector<bn::sprite_ptr, 128>& sprites, long long seconds) {
+    // Convert seconds to minutes and remaining seconds
+    int minutes = seconds / 60;
+    int remainingSecs = seconds % 60;
+    
+    // Format time as MM:SS
+    bn::string<8> timerText;
+    
+    // Add minutes
+    if (minutes < 10) {
+        timerText.append("0");
+    }
+    timerText.append(bn::to_string<2>(minutes));
+    
+    timerText.append(":");
+    
+    // Add seconds
+    if (remainingSecs < 10) {
+        timerText.append("0");
+    }
+    timerText.append(bn::to_string<2>(remainingSecs));
+    
+    // Generate the sprite centered on screen
+    text_generator.generate(0, 0, timerText, sprites);
+}
+
+// Render the timer screen
+void renderTimer(PomodoroContext& ctx, bn::sprite_text_generator& text_generator, 
+                bn::vector<bn::sprite_ptr, 128>& sprites) {
+    // Use string_view for static UI text
+    bn::string_view title_text = "MISSION TIMER";
+    bn::string_view time_panel = "TIME";
+    bn::string_view progress_panel = "PROGRESS";
+    bn::string_view command_panel = "COMMAND";
+    
+    // Dynamically choose start/pause text based on timer state
+    bn::string_view start_text = ctx.timerActive ? "PAUSE: A" : "START: A";
+    bn::string_view reset_text = "RESET: B";
+    bn::string_view menu_text = "MENU: SELECT";
+    
+    // Create new empty vector to replace the current one
+    sprites = bn::vector<bn::sprite_ptr, 128>();
+    
+    // Draw title
+    text_generator.generate(0, -70, title_text, sprites);
+    
+    // Draw timer panel
+    drawPanel(text_generator, sprites, 0, -30, 100, 50, bn::color(0, 31, 31), time_panel);
+    
+    // Draw timer
+    renderTimerText(text_generator, sprites, ctx.secondsRemaining);
+    
+    // Draw progress panel
+    drawPanel(text_generator, sprites, 0, 25, 200, 40, bn::color(0, 31, 31), progress_panel);
+    
+    // Calculate total time based on current state
+    int totalTime = 0;
+    if (ctx.state == PomodoroState::WORK) {
+        totalTime = ctx.config.workTime;
+    } else if (ctx.state == PomodoroState::SHORT_BREAK) {
+        totalTime = ctx.config.shortBreakTime;
+    } else if (ctx.state == PomodoroState::LONG_BREAK) {
+        totalTime = ctx.config.longBreakTime;
+    } else {
+        totalTime = 1; // Prevent division by zero
+    }
+    
+    // Calculate elapsed time (total - remaining)
+    int elapsed = totalTime - ctx.secondsRemaining;
+    
+    // Draw progress bar with color based on state
+    bn::color progressColor = bn::color(31, 31, 31); // Default white
+    if (ctx.state == PomodoroState::WORK) {
+        progressColor = ctx.config.workColor;
+    } else if (ctx.state == PomodoroState::SHORT_BREAK) {
+        progressColor = ctx.config.shortColor;
+    } else if (ctx.state == PomodoroState::LONG_BREAK) {
+        progressColor = ctx.config.longColor;
+    }
+    
+    // Draw progress bar with correct parameters
+    drawProgressBar(text_generator, sprites, elapsed, totalTime, progressColor);
+    
+    // Draw command panel
+    drawPanel(text_generator, sprites, 0, 75, 200, 30, bn::color(0, 31, 31), command_panel);
+    
+    // Draw controls
+    text_generator.generate(-60, 75, start_text, sprites);
+    text_generator.generate(0, 75, reset_text, sprites);
+    text_generator.generate(60, 75, menu_text, sprites);
 }
